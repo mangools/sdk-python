@@ -1,0 +1,85 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mangools"
+dynamic = ["version"]
+description = "Python client for the Mangools API (KWFinder, SERPChecker, SERPWatcher, LinkMiner, SiteProfiler, AI Search Watcher)."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [{ name = "Mangools" }]
+keywords = ["mangools", "kwfinder", "serpwatcher", "seo", "openapi", "sdk"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Internet :: WWW/HTTP",
+  "Typing :: Typed",
+]
+
+# Lower bounds are the generator's own; the httpx upper bound tracks the range
+# openapi-python-client 0.26.2 generates against.
+dependencies = [
+  "httpx>=0.23.0,<0.29.0",
+  "attrs>=22.2.0",
+  "python-dateutil>=2.8.0,<3",
+]
+
+[project.urls]
+Homepage = "https://mangools.com"
+Documentation = "https://apidocs.mangools.com"
+Source = "https://github.com/mangools/sdk-python"
+
+[tool.hatch.version]
+path = "mangools/__init__.py"
+
+# The package directory and the spec are generated and gitignored, so hatchling must
+# not skip them.
+[tool.hatch.build.targets.wheel]
+packages = ["mangools"]
+ignore-vcs = true
+
+# The sdist carries the spec the package was built from, and everything needed to
+# generate the package from it again.
+[tool.hatch.build.targets.sdist]
+ignore-vcs = true
+include = [
+  "/mangools",
+  "/scripts",
+  "/templates",
+  "/openapi.json",
+  "/openapi-python-client.yaml",
+  "/requirements-dev.txt",
+]
+
+# Mirrors the generator's own defaults so its post-hooks and `ruff check` agree.
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+extend-exclude = ["build"]
+
+[tool.ruff.lint]
+select = ["F", "I", "UP"]
+
+[tool.mypy]
+# The package floor is 3.9, but no mypy can check at 3.9 here: httpx pulls in
+# anyio, whose source uses `match`, and mypy parses dependency source at the
+# requested version. mypy 2.x removed `--python-version 3.9` outright. 3.9 is
+# instead verified for real by the import gate in `.github/workflows/ci.yml`,
+# which imports every generated module on a 3.9 interpreter.
+python_version = "3.10"
+strict = true
+files = ["mangools", "scripts"]
+
+[[tool.mypy.overrides]]
+module = "dateutil.*"
+ignore_missing_imports = true

@@ -1,0 +1,26 @@
+# Generator configuration for the `mangools` Python SDK, consumed by scripts/generate.sh.
+# The package version is not set here: generate.sh appends `package_version_override`
+# from the VERSION environment variable.
+
+package_name_override: mangools
+project_name_override: mangools
+
+# The Mangools field names are terse (sv, svn, svs, msv, seo, seo_ts, lid, ts).
+# Attribute-level docstrings put whatever description the spec carries into IDE
+# hovers instead of burying it in one class-level Attributes block.
+docstrings_on_attributes: true
+
+# `model.py.jinja` names the instance it builds in `from_dict` after the module,
+# so the schema `Error` — whose only property is also called `error` — generates
+# `error = ErrorError.from_dict(...)` followed by `error = cls(error=error)`.
+# That is a rebinding to an unrelated type and `mypy --strict` rejects it. Only
+# the module is renamed; the class stays `Error`, exactly as the spec declares.
+class_overrides:
+  Error:
+    module_name: api_error
+
+# Pinned rather than inherited so the formatting does not move when the generator
+# changes its defaults.
+post_hooks:
+  - "ruff check . --fix --extend-select=I"
+  - "ruff format ."

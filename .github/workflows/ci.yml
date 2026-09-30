@@ -1,0 +1,211 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: Package version to build
+        type: string
+        default: ""
+      spec-sha256:
+        description: Fail if the live spec no longer has this sha256
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  generate:
+    name: fetch the live spec, lint it and generate the package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: fetch the live spec
+        run: python scripts/fetch_spec.py
+      - name: the spec is the one the release was decided on
+        if: inputs.spec-sha256 != ''
+        env:
+          EXPECTED: ${{ inputs.spec-sha256 }}
+        run: |
+          ACTUAL=$(python -c "import json,sys;sys.path.insert(0,'scripts');from fetch_spec import sha256_of;print(sha256_of(json.load(open('openapi.json'))))")
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::The live spec changed while the release ran ($EXPECTED, now $ACTUAL). The next scheduled run picks it up."
+            exit 1
+          fi
+      - run: npx --yes @redocly/cli@2.47.0 lint openapi.json
+      - run: npx --yes @stoplight/spectral-cli@6.16.3 lint openapi.json --ruleset .spectral.yaml
+      - name: generate the package
+        env:
+          VERSION: ${{ inputs.version }}
+        run: ./scripts/generate.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: generated
+          path: |
+            openapi.json
+            mangools
+            SPEC_GAPS.md
+            TYPE_GAPS.md
+
+  lint:
+    name: ruff
+    needs: generate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: generated
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: ruff format --check .
+
+  typecheck:
+    name: mypy --strict and the spec-derived Any gate
+    needs: generate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: generated
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: install the package's own runtime dependencies
+        run: pip install .
+      - name: mypy --strict
+        run: mypy
+
+      # Fails while the OpenAPI document leaves a response or an array element
+      # undescribed: `mypy --strict` proves the client is internally consistent, and
+      # this proves the types mean something. The failure names the JSON Pointer and
+      # the fix, which belong in the API definition.
+      - name: no spec-derived Any
+        run: python scripts/check_spec_any.py openapi.json --package mangools
+
+  build:
+    name: python -m build
+    needs: generate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: generated
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: python -m build
+      - run: twine check --strict dist/*
+      - name: the wheel carries the PEP 561 marker
+        run: python -c "import zipfile,glob,sys; n=glob.glob('dist/*.whl')[0]; names=zipfile.ZipFile(n).namelist(); sys.exit(0 if 'mangools/py.typed' in names else 'py.typed is missing from ' + n)"
+      - name: the sdist carries the spec and the generated package
+        run: |
+          python - <<'PY'
+          import glob
+          import sys
+          import tarfile
+
+          path = glob.glob("dist/*.tar.gz")[0]
+          root = path.removeprefix("dist/").removesuffix(".tar.gz")
+          names = set(tarfile.open(path).getnames())
+          wanted = [f"{root}/openapi.json", f"{root}/mangools/__init__.py", f"{root}/mangools/client.py"]
+          missing = [n for n in wanted if n not in names]
+          sys.exit(f"{path} is missing {missing}" if missing else 0)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  import:
+    name: import from a clean venv (py${{ matrix.python-version }})
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: generated
+          path: generated
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # No checkout: the venv must resolve `mangools` from the wheel, not from a
+      # source tree that happens to be the working directory. This is also where
+      # the 3.9 floor is verified for real, because mypy cannot check at 3.9 while
+      # httpx's own dependencies use 3.10 syntax.
+      - name: install the wheel into an empty venv
+        run: |
+          python -m venv /tmp/clean
+          /tmp/clean/bin/pip install --disable-pip-version-check dist/*.whl
+      - name: import every generated module
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          /tmp/clean/bin/python - <<'PY'
+          import importlib
+          import json
+          import os
+          import pkgutil
+
+          import mangools
+
+          with open("generated/openapi.json", encoding="utf-8") as handle:
+              spec = json.load(handle)
+          schemes = spec["components"]["securitySchemes"].values()
+          header = next(s["name"] for s in schemes if s["type"] == "apiKey")
+
+          modules = [m.name for m in pkgutil.walk_packages(mangools.__path__, "mangools.")]
+          for name in sorted(modules):
+              importlib.import_module(name)
+
+          assert mangools.API_KEY_HEADER == header, mangools.API_KEY_HEADER
+          assert mangools.DEFAULT_BASE_URL == spec["servers"][0]["url"], mangools.DEFAULT_BASE_URL
+          assert len(mangools.SPEC_SHA256) == 64, mangools.SPEC_SHA256
+          expected = os.environ["EXPECTED_VERSION"]
+          assert not expected or mangools.__version__ == expected, mangools.__version__
+          assert mangools.MangoolsClient(api_key="placeholder") is not None
+          print(f"imported {len(modules)} modules from mangools {mangools.__version__} (spec {mangools.SPEC_SHA256})")
+          PY

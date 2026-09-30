@@ -1,0 +1,97 @@
+name: Release
+
+# Publishes to PyPI when the live OpenAPI document differs from the one the latest
+# published version was built from. Nothing here commits a version: it is computed
+# and applied to the build only.
+
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  OASDIFF_VERSION: 1.32.1
+
+jobs:
+  decide:
+    name: compare the live spec with the published one
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.decision.outputs.release }}
+      version: ${{ steps.decision.outputs.version }}
+      live_sha256: ${{ steps.decision.outputs.live_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install oasdiff
+        run: |
+          BASE="https://github.com/oasdiff/oasdiff/releases/download/v${OASDIFF_VERSION}"
+          ARCHIVE="oasdiff_${OASDIFF_VERSION}_linux_amd64.tar.gz"
+          curl -fsSLO "$BASE/$ARCHIVE"
+          curl -fsSLO "$BASE/checksums.txt"
+          grep " $ARCHIVE\$" checksums.txt | sha256sum -c -
+          tar xzf "$ARCHIVE" oasdiff
+          echo "OASDIFF=$PWD/oasdiff" >> "$GITHUB_ENV"
+      - id: decision
+        run: python scripts/release_decision.py
+      - if: steps.decision.outputs.release == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: build/changelog.md
+
+  gates:
+    name: build and check the release candidate
+    needs: decide
+    if: needs.decide.outputs.release == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      version: ${{ needs.decide.outputs.version }}
+      spec-sha256: ${{ needs.decide.outputs.live_sha256 }}
+
+  publish:
+    name: publish to PyPI
+    needs: [decide, gates]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: tag the built commit and create the GitHub Release
+    needs: [decide, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+          path: notes
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.decide.outputs.version }}
+        run: |
+          gh release create "v$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "v$VERSION" \
+            --notes-file notes/changelog.md
