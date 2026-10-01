@@ -1,0 +1,62 @@
+{% from "helpers.jinja" import safe_docstring %}
+{#
+  Overrides openapi-python-client's package_init.py.jinja (ChoiceLoader puts this
+  directory first). Upstream emits only the two client re-exports; this adds the
+  `MangoolsClient` entry point.
+
+  MangoolsClient is a factory, not a subclass: AuthenticatedClient is an attrs
+  slotted class whose `with_headers`/`with_cookies` helpers call `attrs.evolve`,
+  and evolve reconstructs via the class's own `__init__`. A subclass with a
+  different signature would break those helpers at runtime.
+#}
+{{ safe_docstring(package_description) }}
+from typing import Any
+
+from ._spec import API_KEY_HEADER, DEFAULT_BASE_URL, SPEC_SHA256, SPEC_VERSION
+from .client import AuthenticatedClient, Client
+
+__version__ = "{{ package_version }}"
+
+__all__ = (
+    "API_KEY_HEADER",
+    "DEFAULT_BASE_URL",
+    "SPEC_SHA256",
+    "SPEC_VERSION",
+    "AuthenticatedClient",
+    "Client",
+    "MangoolsClient",
+    "__version__",
+)
+
+
+def MangoolsClient(
+    api_key: str,
+    *,
+    base_url: str = DEFAULT_BASE_URL,
+    **httpx_kwargs: Any,
+) -> AuthenticatedClient:
+    """Build a client authenticated with a Mangools API key.
+
+    Mangools authenticates with an API key in the ``x-access-token`` header, not
+    with an RFC 6750 ``Authorization: Bearer`` header, so ``prefix`` is empty and
+    ``auth_header_name`` is taken from the spec's ``ApiKeyAuth`` security scheme.
+
+    Args:
+        api_key: The token issued for your Mangools account. Read it from the
+            environment; never commit it.
+        base_url: Override the API root. Defaults to the spec's ``servers[0].url``.
+        httpx_kwargs: Forwarded verbatim to ``AuthenticatedClient`` — ``timeout``,
+            ``headers``, ``cookies``, ``verify_ssl``, ``follow_redirects``,
+            ``httpx_args``, ``raise_on_unexpected_status``.
+
+    Returns:
+        An ``AuthenticatedClient`` accepted by every function under
+        ``mangools.api``.
+    """
+    return AuthenticatedClient(
+        base_url=base_url,
+        token=api_key,
+        prefix="",
+        auth_header_name=API_KEY_HEADER,
+        **httpx_kwargs,
+    )

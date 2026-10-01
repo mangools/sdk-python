@@ -1,0 +1,15 @@
+# Fetched from the live API and generated from it; see scripts/fetch_spec.py and scripts/generate.sh.
+/openapi.json
+/mangools/
+/SPEC_GAPS.md
+/TYPE_GAPS.md
+
+# Toolchain venvs and build output.
+/build/
+/dist/
+
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.venv/
